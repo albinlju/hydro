@@ -1,14 +1,21 @@
 ﻿function HydroCore() {
   let promiseChain = {};
+
+  const defaultConfig = { // Not Overridable
+    requestClass: "hydro-request", 
+  }
+
+  const configMeta = document.querySelector('meta[name="hydro-config"]');
+  const metaConfig = configMeta ? JSON.parse(configMeta.content) : {};
+
   let config = {
-    requestClass: "hydro-request",
     historyEnabled: true,
     refreshOnCacheMiss: false,
-    historyCacheSize: 10
+    historyCacheSize: 10,
+    ...metaConfig
   }
-  const configMeta = document.querySelector('meta[name="hydro-config"]');
-  
-  mergeObjects(config, configMeta ? JSON.parse(configMeta.content) : {});
+
+  config = {...config, ...defaultConfig };
 
   async function loadPageContent(url, selector, push, condition, payload) {
     const element = document.querySelector(selector);
@@ -58,7 +65,7 @@
         if (push) {
           history.pushState({hydro: true}, '', url);
           pathForHistorySnapshot = url;
-          window.scrollTo({top: 0,  bottom: 0, behavior: 'auto',});
+          window.scrollTo(0, 0);
         }
       }
     } catch (error) {
@@ -472,10 +479,8 @@
 
     historyCache.push({url: url, content: content, title: title, scroll: scroll});
 
-    while (historyCache.length > config.historyCacheSize) {
-        historyCache.shift();
-    }
-
+    while (historyCache.length > config.historyCacheSize) historyCache.shift();
+    
     while(historyCache.length > 0){
         try {
             localStorage.setItem(HISTORYCACHENAME, JSON.stringify(historyCache));
@@ -530,12 +535,7 @@
     if (config.historyEnabled) history.replaceState({hydro: true}, document.title, window.location.href);
   }
 
-  async function loadHistoryFromServer(path) {
-    await loadPageContent(path, 'body', false)
-    pathForHistorySnapshot = path;
-  }
-
-  function restoreHistory(path) {
+ async function restoreHistory(path) {
     saveCurrentPageToHistory();
     const currentpath = path || location.pathname+location.search;
     const cached = getCachedHistory(currentpath);
@@ -553,7 +553,10 @@
 
     } else {
         if (config.refreshOnCacheMiss) window.location.reload(true);
-        else loadHistoryFromServer(path);
+        else {
+          await loadPageContent(currentpath, 'body', false) // Load from server
+          pathForHistorySnapshot = path;
+        } 
     }
   }
 
@@ -611,15 +614,6 @@
     }
   }
 
-  function mergeObjects(obj1, obj2) {
-    for (var key in obj2) {
-        if (obj2.hasOwnProperty(key)) {
-            obj1[key] = obj2[key];
-        }
-    }
-    return obj1;
-  }
-
   function parseJSON(jString) {
     try {
         return JSON.parse(jString);
@@ -640,13 +634,9 @@
   const originalPopstate = window.onpopstate ? window.onpopstate.bind(window) : null;
 
   window.addEventListener('popstate', async function (event) {
-    if(event.state){
-      restoreHistory();
-    } else {
-      if(originalPopstate){
-        originalPopstate(event);
-      }
-    }
+    if(event.state && event.state.hydro) restoreHistory();
+    else 
+      if(originalPopstate) originalPopstate(event);
   });
 
   return {
@@ -808,12 +798,12 @@ document.addEventListener('alpine:init', () => {
         const link = event.currentTarget;
         const url = link.getAttribute('href');
         currentBoostUrl = url;
-        const classTimeout = setTimeout(() => link.classList.add('hydro-request'), 200);
+        const classTimeout = setTimeout(() => link.classList.add(Hydro.config.requestClass), 200);
         try {
           await window.Hydro.loadPageContent(url, 'body', true, () => currentBoostUrl === url);
         } finally {
           clearTimeout(classTimeout);
-          link.classList.remove('hydro-request')
+          link.classList.remove(Hydro.config.requestClass)
         }
       };
 
