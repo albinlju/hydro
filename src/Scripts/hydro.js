@@ -1,8 +1,14 @@
 ﻿function HydroCore() {
   let promiseChain = {};
-
+  let config = {
+    requestClass: "hydro-request",
+    historyEnabled: true,
+    refreshOnCacheMiss: false,
+    historyCacheSize: 10
+  }
   const configMeta = document.querySelector('meta[name="hydro-config"]');
-  const config = configMeta ? JSON.parse(configMeta.content) : {};
+  
+  mergeObjects(config, configMeta ? JSON.parse(configMeta.content) : {});
 
   async function loadPageContent(url, selector, push, condition, payload) {
     const element = document.querySelector(selector);
@@ -10,7 +16,7 @@
 
     try {
       let headers = {
-        'Hydro-Request': 'true',
+        [config.requestClass]: 'true',
         'Hydro-Boosted': 'true'
       };
 
@@ -36,6 +42,7 @@
         throw new Error(`HTTP error! status: ${response.status}`);
       } else {
         let data = await response.text();
+        saveCurrentPageToHistory();
 
         let parser = new DOMParser();
         let doc = parser.parseFromString(data, 'text/html');
@@ -43,16 +50,15 @@
         let newTitle = doc.querySelector('head>title');
         element.innerHTML = newContent.innerHTML;
 
-        if (selector === 'body') {
-          window.scrollTo(0, 0);
-        }
-
         if (newTitle) {
           document.title = newTitle.textContent;
         }
 
+
         if (push) {
-          history.pushState({}, '', url);
+          history.pushState({hydro: true}, '', url);
+          pathForHistorySnapshot = url;
+          window.scrollTo({top: 0,  bottom: 0, behavior: 'auto',});
         }
       }
     } catch (error) {
@@ -155,7 +161,7 @@
     }
 
     el.setAttribute("hydro-operation-id", binding[component.id].operationId);
-    el.classList.add('hydro-request');
+    el.classList.add(config.requestClass);
 
     if (bindAlreadyInitialized) {
       return Promise.resolve();
@@ -229,7 +235,7 @@
         const operationTrigger = document.querySelector(`[hydro-operation-id="${operationId}"]`);
 
         if (operationTrigger) {
-          classTimeout = setTimeout(() => operationTrigger.classList.add('hydro-request'), 200);
+          classTimeout = setTimeout(() => operationTrigger.classList.add(config.requestClass), 200);
           disableTimer = setTimeout(() => operationTrigger.disabled = true, 200);
         }
       }
@@ -246,7 +252,7 @@
     await enqueueHydroPromise(componentId, async () => {
       try {
         let headers = {
-          'Hydro-Request': 'true'
+          [config.requestClass]: 'true'
         };
 
         if (config.Antiforgery) {
@@ -344,8 +350,8 @@
 
                   to.setAttribute("hydro-operation-id", from.getAttribute("hydro-operation-id"));
                   to.disabled = from.disabled;
-                  if (from.classList.contains('hydro-request')) {
-                    to.classList.add('hydro-request');
+                  if (from.classList.contains(config.requestClass)) {
+                    to.classList.add(config.requestClass);
                   }
                 }
 
@@ -431,7 +437,7 @@
             if (operationTrigger.length && (operationStatus[operationId] <= 0 || type === 'bind')) {
               operationTrigger.forEach(trigger => {
                 trigger.disabled = false;
-                trigger.classList.remove('hydro-request');
+                trigger.classList.remove(config.requestClass);
                 trigger.removeAttribute('hydro-operation-id');
               })
             }
@@ -439,6 +445,116 @@
         }, 20); // make sure it's delayed more than 0 and less than 50
       }
     });
+  }
+
+
+  // ===========================
+  //  History snapshot support
+  // ===========================
+
+  const HISTORYCACHENAME = "hydro-history-cache";
+
+  let pathForHistorySnapshot = location.pathname + location.search;
+
+  function getHistoryElement() {
+    return document.body;
+  }
+
+  function saveToHistoryCache(url, content, title, scroll) {
+    if (!canAccessLocalStorage()) return;
+    if (config.historyCacheSize <= 0) return localStorage.removeItem(HISTORYCACHENAME);
+        
+    url = normalizePath(url);
+    
+    var historyCache = parseJSON(localStorage.getItem(HISTORYCACHENAME)) || [];
+    const existingHistoryUrl = historyCache.findIndex(cacheItem => cacheItem.url === url);
+    if (existingHistoryUrl !== -1) historyCache.splice(existingHistoryUrl, 1);
+
+    historyCache.push({url: url, content: content, title: title, scroll: scroll});
+
+    while (historyCache.length > config.historyCacheSize) {
+        historyCache.shift();
+    }
+
+    while(historyCache.length > 0){
+        try {
+            localStorage.setItem(HISTORYCACHENAME, JSON.stringify(historyCache));
+            break;
+        } catch (e) {
+            historyCache.shift(); // shrink the cache and retry
+        }
+    }
+  }
+
+  function getCachedHistory(url) {
+    if (!canAccessLocalStorage()) return null;
+    
+    const normalizedUrl = normalizePath(url);
+    const historyCache = parseJSON(localStorage.getItem(HISTORYCACHENAME)) || [];
+
+    return historyCache.find(cacheItem => cacheItem.url === normalizedUrl) || null;
+  }
+
+  function cleanInnerHtmlForHistory(elt) {
+    const className = config.requestClass;
+    const clone = elt.cloneNode(true);
+    const elementsToClean = clone.querySelectorAll("." + className);
+    
+    elementsToClean.forEach(child => {
+      if (child.classList) {
+        child.classList.remove(className);
+        if (child.classList.length === 0) child.removeAttribute("class");
+      }
+    });
+
+    return clone.innerHTML;
+  }
+
+  function saveCurrentPageToHistory() {
+    var elt = getHistoryElement();
+    var path = pathForHistorySnapshot || location.pathname+location.search;
+
+    // Check if the history snapshot feature is disabled by the attribute hydro-history="false"
+    // to prevent privileged data entering the cache.
+    var disableHistoryCache
+    try {
+        disableHistoryCache = document.querySelector('[hydro-history="false" i]')
+    } catch (e) {
+        // IE11: insensitive modifier not supported so fallback to case sensitive selector
+        disableHistoryCache = document.querySelector('[hydro-history="false"]')
+    }
+    if (!disableHistoryCache) {
+        saveToHistoryCache(path, cleanInnerHtmlForHistory(elt), document.title, window.scrollY);
+    }
+
+    if (config.historyEnabled) history.replaceState({hydro: true}, document.title, window.location.href);
+  }
+
+  async function loadHistoryFromServer(path) {
+    await loadPageContent(path, 'body', false)
+    pathForHistorySnapshot = path;
+  }
+
+  function restoreHistory(path) {
+    saveCurrentPageToHistory();
+    const currentpath = path || location.pathname+location.search;
+    const cached = getCachedHistory(currentpath);
+
+    if (cached) {
+        const historyElement = getHistoryElement();
+        historyElement.innerHTML = cached.content;
+        document.title = cached.title;
+
+        setTimeout(function () {
+            window.scrollTo(0, cached.scroll);
+        }, 0); 
+
+        pathForHistorySnapshot = currentpath;
+
+    } else {
+        if (config.refreshOnCacheMiss) window.location.reload(true);
+        else loadHistoryFromServer(path);
+    }
   }
 
   function isElementDirty(element) {
@@ -462,14 +578,75 @@
     }
   }
 
+  function canAccessLocalStorage() {
+    var test = 'hydro:isLocalStorageAvailable';
+    try {
+        localStorage.setItem(test, test);
+        localStorage.removeItem(test);
+        return true;
+    } catch(e) {
+        return false;
+    }
+  }
+
   function toBase64Json(value) {
     return value !== null && value !== undefined
       ? btoa(String.fromCodePoint(...new TextEncoder().encode(JSON.stringify(value))))
       : null;
   }
 
-  window.addEventListener('popstate', async function () {
-    await loadPageContent(window.location.href, 'body', false);
+  function normalizePath(path) {
+    try {
+        var url = new URL(path);
+        if (url) {
+            path = url.pathname + url.search;
+        }
+        // remove trailing slash, unless index page
+        if (!(/^\/$/.test(path))) {
+            path = path.replace(/\/+$/, '');
+        }
+        return path;
+    } catch (e) {
+        return path;
+    }
+  }
+
+  function mergeObjects(obj1, obj2) {
+    for (var key in obj2) {
+        if (obj2.hasOwnProperty(key)) {
+            obj1[key] = obj2[key];
+        }
+    }
+    return obj1;
+  }
+
+  function parseJSON(jString) {
+    try {
+        return JSON.parse(jString);
+    } catch(error) {
+        logError(error);
+        return null;
+    }
+  }
+
+  function logError(msg) {
+    if(console.error) {
+        console.error(msg);
+    } else if (console.log) {
+        console.log("ERROR: ", msg);
+    }
+  }
+
+  const originalPopstate = window.onpopstate ? window.onpopstate.bind(window) : null;
+
+  window.addEventListener('popstate', async function (event) {
+    if(event.state){
+      restoreHistory();
+    } else {
+      if(originalPopstate){
+        originalPopstate(event);
+      }
+    }
   });
 
   return {
